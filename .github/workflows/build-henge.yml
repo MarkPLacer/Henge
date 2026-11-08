@@ -7,9 +7,6 @@ on:
     # Poll upstream every six hours (UTC).
     - cron: "13 */6 * * *"
 
-permissions:
-  contents: write
-
 concurrency:
   group: henge-upstream-build
   cancel-in-progress: true
@@ -20,8 +17,14 @@ env:
 
 jobs:
   build:
+    # Run untrusted upstream build scripts with read-only repository permissions.
     runs-on: xcode-27
     timeout-minutes: 120
+    permissions:
+      contents: read
+    outputs:
+      henge_sha: ${{ steps.henge.outputs.sha }}
+      husk_sha: ${{ steps.husk.outputs.sha }}
 
     steps:
       - name: Check out latest upstream Henge
@@ -115,9 +118,27 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
+  publish:
+    # Keep the write-capable token away from the upstream build scripts.
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download IPA artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: Henge-${{ needs.build.outputs.henge_sha }}
+          path: output
+
+      - name: Verify IPA checksum
+        working-directory: output
+        run: sha256sum -c SHA256SUMS.txt
+
       - name: Publish rolling latest release
         uses: softprops/action-gh-release@v2
         with:
+          token: ${{ secrets.GITHUB_TOKEN }}
           tag_name: latest
           name: Latest Henge Development Build
           prerelease: true
@@ -130,8 +151,8 @@ jobs:
           body: |
             Unofficial development build from the latest upstream Leviidev/Henge main commit.
 
-            Henge commit: ${{ steps.henge.outputs.sha }}
-            Husk commit: ${{ steps.husk.outputs.sha }}
+            Henge commit: ${{ needs.build.outputs.henge_sha }}
+            Husk commit: ${{ needs.build.outputs.husk_sha }}
 
             The IPA is ad-hoc signed, not signed with your personal Apple developer certificate.
             Use a compatible sideloading workflow. Use at your own risk.
