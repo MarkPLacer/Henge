@@ -1,0 +1,137 @@
+# Builds an unofficial Henge IPA from the latest upstream commit.
+name: Build Latest Henge IPA
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Poll upstream every six hours (UTC).
+    - cron: "13 */6 * * *"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: henge-upstream-build
+  cancel-in-progress: true
+
+env:
+  HUSK: ${{ github.workspace }}/Husk
+  IOS_DEPS: ${{ github.workspace }}/Husk/build/ios-arm64/sysroot
+
+jobs:
+  build:
+    runs-on: xcode-27
+    timeout-minutes: 120
+
+    steps:
+      - name: Check out latest upstream Henge
+        uses: actions/checkout@v4
+        with:
+          repository: Leviidev/Henge
+          ref: main
+          path: Henge
+
+      - name: Record Henge commit
+        id: henge
+        working-directory: Henge
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Check out Husk
+        uses: actions/checkout@v4
+        with:
+          repository: Leviidev/Husk
+          ref: main
+          path: Husk
+
+      - name: Record Husk commit
+        id: husk
+        working-directory: Husk
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache Husk sources and iOS dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            Husk/third_party/build
+            Husk/build
+          key: husk-ios-arm64-${{ steps.husk.outputs.sha }}-${{ runner.os }}-${{ hashFiles('Husk/scripts/build_ios.sh', 'Husk/scripts/fetch_sources.sh') }}
+
+      - name: Install build tools
+        run: |
+          set -euxo pipefail
+          brew install xcodegen meson ninja pkg-config
+          rustup target add aarch64-apple-ios || {
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+            rustup target add aarch64-apple-ios
+          }
+
+      - name: Fetch Husk third-party sources
+        working-directory: Husk
+        run: bash scripts/fetch_sources.sh
+
+      - name: Build Husk iOS dependencies
+        working-directory: Husk
+        run: bash scripts/build_ios.sh libffi glib libslirp
+
+      - name: Build Husk pairing library
+        working-directory: Husk
+        run: bash scripts/build_rppairing_ios.sh
+
+      - name: Copy dependencies into Henge
+        working-directory: Henge
+        run: zsh ios/scripts/fetch_deps.sh
+
+      - name: Build restore stack
+        working-directory: Henge
+        run: zsh tools/build_ios_restore.sh
+
+      - name: Build Henge engine
+        working-directory: Henge
+        run: make ios-lib
+
+      - name: Package IPA
+        working-directory: Henge
+        run: zsh ios/scripts/package_ipa.sh
+
+      - name: Prepare build metadata
+        run: |
+          set -euxo pipefail
+          mkdir -p output
+          cp /Users/runner/Desktop/Henge.ipa output/Henge.ipa
+          cat > output/build-info.txt <<EOF
+          Henge upstream: https://github.com/Leviidev/Henge
+          Henge commit: ${{ steps.henge.outputs.sha }}
+          Husk commit: ${{ steps.husk.outputs.sha }}
+          Build date (UTC): $(date -u +%Y-%m-%dT%H:%M:%SZ)
+          Workflow run: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          EOF
+          shasum -a 256 output/Henge.ipa > output/SHA256SUMS.txt
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Henge-${{ steps.henge.outputs.sha }}
+          path: output/
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Publish rolling latest release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: Latest Henge Development Build
+          prerelease: true
+          make_latest: false
+          overwrite_files: true
+          files: |
+            output/Henge.ipa
+            output/build-info.txt
+            output/SHA256SUMS.txt
+          body: |
+            Unofficial development build from the latest upstream Leviidev/Henge main commit.
+
+            Henge commit: ${{ steps.henge.outputs.sha }}
+            Husk commit: ${{ steps.husk.outputs.sha }}
+
+            The IPA is ad-hoc signed, not signed with your personal Apple developer certificate.
+            Use a compatible sideloading workflow. Use at your own risk.
